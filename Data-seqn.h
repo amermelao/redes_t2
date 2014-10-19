@@ -1,7 +1,8 @@
 #define DID   0
 #define DTYPE 1
 #define DSEQ 2
-#define DHDR  3
+#define DRET 3
+#define DHDR 4
 
 #define BUF_SIZE 1400+DHDR
 
