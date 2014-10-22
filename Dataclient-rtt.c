@@ -40,7 +40,7 @@ static pthread_cond_t  Dcond;
 static pthread_t Drcvr_pid, Dsender_pid;
 static unsigned char ack[DHDR] = {0, ACK, 0, 0}; /* David: agregamos un byte para indicar retransmisiones */
 double T1, T2; /* David: variables globales para calcular RTTs */
-char LAR = -1, LFS = -1; /* David: LAR y LFS de Go-back-N . Roberto: Se inicializa en -1 para que la promera vez se haga 0*/
+char LAR = -1, LFS = 0; /* David: LAR y LFS de Go-back-N . Roberto: Se inicializa en -1 para que la promera vez se haga 0*/
 
 static void *Dsender(void *ppp);
 static void *Drcvr(void *ppp);
@@ -80,6 +80,14 @@ void wBackUp(unsigned char pending_buf[BUF_SIZE], int pending_sz, int index) {
     	memcpy(BackUp.pending_buf[index],pending_buf,pending_sz);/*Robert: strcopy no hacia bn su trabajo*/
         BackUp.akg_recive[index] = 0;
 	BackUp.pending_sz[index] = pending_sz;
+}
+
+unsigned char expectingACK() {
+	int k;
+	for(k=0; k<SWS; k++)
+		if(!BackUp.akg_recive[k])
+			return 1;
+	return 0;
 }
 
 /* David: RTT promedio de la ventana */
@@ -292,7 +300,7 @@ static void *Drcvr(void *ppp) {
 
 	pthread_mutex_lock(&Dlock);
 	if(inbuf[DTYPE] == CLOSE) {
-	if(Data_debug) fprintf(stderr, "recibo cierre conexión %d, envío ACK\n", cl);
+	    if(Data_debug) fprintf(stderr, "recibo cierre conexión %d, envío ACK\n", cl);
 	    ack[DID] = cl;
 	    ack[DTYPE] = ACK;
 	    ack[DSEQ] = inbuf[DSEQ];
@@ -309,7 +317,7 @@ static void *Drcvr(void *ppp) {
 	    Dclose(cl);
 	}
 	else if(inbuf[DTYPE] == ACK && connection.state != FREE
-		&& connection.expecting_ack && ( (connection.expected_ack <= inbuf[DSEQ] && inbuf[DSEQ]-connection.expected_seq<50) || (connection.expected_seq >= inbuf[DSEQ] && connection.expected_seq-inbuf[DSEQ]>205) ) ) { /* David: se cambia "connection.expected_ack == inbuf[DSEQ]" al operador "<=" */
+		&& connection.expecting_ack && ( seqIsHeigher(LAR+1,inbuf[DSEQ]) && seqIsHeigher(inbuf[DSEQ],LFS) ) ) { /* David: se cambia "connection.expected_ack == inbuf[DSEQ]" al operador "<=" */
     	    /* David: medimos RTT cuando recibimos ACK */
 	    if(~inbuf[DRET]) { /* Si no hay retransmisión */
                 connection.timeRef = connection.rtt_time[connection.rtt_idx];/* Roberto: se cambia la referencia al valor que se esta lledo*/
@@ -332,7 +340,7 @@ static void *Drcvr(void *ppp) {
             }
                 
 
-	    //connection.expecting_ack = 0; /* ??? */
+	    connection.expecting_ack = AND_ack(); /* ??? */
 	    if(connection.state == CLOSED) {
 		/* conexion cerrada y sin buffers pendientes */
 		del_connection();
@@ -436,23 +444,21 @@ static void *Dsender(void *ppp) {
 
                 for(i = 0; i < SWS; i++)
                 {
-                    indexOfWindow = (i+BackUp.LASTSENDINBOX+1)%50;
-                    if(++BackUp.pending_buf[indexOfWindow][DRET] > RETRIES) {
-                        fprintf(stderr, "too many retries: %d. el numero en el buff %d\n", connection.retries,indexOfWindow);
-                        del_connection();
-                        exit(1);
-                    }
-                }
+                    	indexOfWindow = (i+BackUp.LASTSENDINBOX+1)%50;
+			if(BackUp.akg_recive[indexOfWindow] == 1)
+				continue;
+                    	if(++BackUp.pending_buf[indexOfWindow][DRET] > RETRIES) {
+                        	fprintf(stderr, "too many retries: %d. el numero en el buff %d\n", connection.retries,indexOfWindow);
+                        	del_connection();
+                        	exit(1);
+                    	}
 
-		/* David: retransmisión de ventana */
-		for(i=0; i<SWS; i++) {
- 	  		if(Data_debug) fprintf(stderr, "Re-send DATA %d, seq=%d\n", BackUp.pending_buf[i][DID], BackUp.pending_buf[i][DSEQ]);
-			BackUp.pending_buf[i][DRET]++; /* David: sumamos una retransmisión del paquete */
-	 		if(send(Dsock, BackUp.pending_buf[i], DHDR+BackUp.pending_sz[i], 0) < 0) {
-		    		perror("send2"); exit(1);
-			}
-			connection.timeout = Now() + getRTT()*1.1;
-		}
+			if(Data_debug)
+				fprintf(stderr, "Re-send DATA %d, seq=%d\n", BackUp.pending_buf[indexOfWindow][DID], BackUp.pending_buf[indexOfWindow][DSEQ]);
+                        if(send(Dsock, BackUp.pending_buf[indexOfWindow], DHDR+BackUp.pending_sz[indexOfWindow], 0) < 0)
+                                perror("send2"); exit(1);
+                        connection.timeout = Now() + getRTT()*1.1;
+                }
 
 	    }
 	    if(boxsz(connection.wbox) != 0) { /* && !connection.expecting_ack) */
