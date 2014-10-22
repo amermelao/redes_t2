@@ -1,3 +1,6 @@
+
+#include <strings.h>
+
 #include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -10,11 +13,11 @@
 #endif
 #include <sys/types.h>
 #include <sys/socket.h>
-#include <signal.h>
+#include <signal.h> 
 #include <string.h>
 #include "jsocket6.4.h"
 #include "bufbox.h"
-#include "Data-seqn.h"
+#include "Data-rtt.h"
 
 #define MAX_QUEUE 100 /* buffers en boxes */
 #define SIZE_RTT 10 /* David: cantidad de RTTs a promediar */
@@ -37,7 +40,7 @@ static pthread_cond_t  Dcond;
 static pthread_t Drcvr_pid, Dsender_pid;
 static unsigned char ack[DHDR] = {0, ACK, 0, 0}; /* David: agregamos un byte para indicar retransmisiones */
 double T1, T2; /* David: variables globales para calcular RTTs */
-char LAR, LFS; /* David: LAR y LFS de Go-back-N */
+char LAR = -1, LFS; /* David: LAR y LFS de Go-back-N . Roberto: Se inicializa en -1 para que la promera vez se haga 0*/
 
 static void *Dsender(void *ppp);
 static void *Drcvr(void *ppp);
@@ -59,19 +62,24 @@ struct {
     double rtt_time[SIZE_RTT];           /* Roberto: se agrega un arregle que almacena el tiempo en que se agrega un nuevo elemento al arreglo*/
     double timeRef;                      /* Roberto: para tener una referencia del tiempo*/
     int rtt_idx;			 /* David: indicador de rtt a actualizar */
+    unsigned char number_read;           /*Roberto: para contar los paquetes cargados para que no se para el envio de paquetes*/
 } connection;
 
 /* David: estructura que almacena datos en caso de tener que retransmitir */
 struct {
     unsigned char pending_buf[SWS][BUF_SIZE];
+    double time_Outs[SWS];
+    unsigned char akg_recive[SWS];
     int pending_sz[SWS];
+    unsigned char LASTSENDINBOX;
 } BackUp;
 
 /* Funciones utilitarias */
 
 /* David: almacenar paquetes para posible retransmisión en Go-back-N */
-void wBackUp(unsigned char *pending_buf, int pending_sz, int index) {
-	strcpy(BackUp.pending_buf[index],pending_buf);
+void wBackUp(unsigned char pending_buf[BUF_SIZE], int pending_sz, int index) {
+    	memcpy(BackUp.pending_buf[index],pending_buf,pending_sz);/*Robert: strcopy no hacia bn su trabajo*/
+        BackUp.akg_recive[index] = 0;
 	BackUp.pending_sz[index] = pending_sz;
 }
 
@@ -109,6 +117,22 @@ double Now() {
     return(tt.tv_sec+1e-9*tt.tv_nsec);
 }
 
+/*Roberto: obterner el timeout minimo*/
+
+double getMinTimeOutBackUp(){
+    
+    int i;
+    double min = Now();
+    
+    for(i = 0; i < SWS; i++){
+        if(min < BackUp.time_Outs[i]){
+            min = BackUp.time_Outs[i];
+        }
+    }
+    
+    return 3;
+}
+
 /* Inicializa estructura conexión */
 int init_connection(int id, double rtt,double timeRef, double timeNow) { /* David: se agrega 'rtt', que es el primer RTT calculado */
     int cl, i; /* David: variable 'i' agregada */
@@ -121,15 +145,19 @@ int init_connection(int id, double rtt,double timeRef, double timeNow) { /* Davi
     connection.pending_sz = -1;
     connection.expecting_ack = 0;
     connection.expected_seq = 1;
-    connection.expected_ack = 0;
+    connection.expected_ack = -1;/*Roberto:para que en la primera iteracion no le asigne el numero de secuencia que corresponde*/
     connection.id = id;
     connection.timeRef = timeRef;/*Roberto: se setea la primera referencia*/
+    connection.number_read = 0;/*Rpberto: el numero de paquetes leidos del archivo*/
     for(i=0; i<SIZE_RTT; i++) { /* David: se inicializa arreglo de RTTs */
 	connection.rtt[i] = rtt;
         connection.rtt_time[i] = timeNow;/*Se agregan los primeros tiempos*/
     }
     connection.rtt_idx = 0; /* David: se inicializa indicador de rtt a actualizar en 0 */
 
+    for(i = 0; i < SWS; i++)
+        BackUp.akg_recive[i] = 0;
+    BackUp.LASTSENDINBOX = 0;
     return id;
 }
 
@@ -220,6 +248,7 @@ void Dwrite(int cl, char *buf, int l) {
  * y no va a perder el signal! 
  */
     pthread_mutex_lock(&Dlock);
+    connection.number_read++;
     pthread_cond_signal(&Dcond); 	/* Le aviso a sender que puse datos para él en wbox */
     pthread_mutex_unlock(&Dlock);
 }
@@ -361,14 +390,14 @@ double Dclient_timeout_or_pending_data() {
 static void *Dsender(void *ppp) { 
     double timeout;
     struct timespec tt;
-    int i;
+    int i,indexOfWindow;
     int ret;
 
   
     for(;;) {
 	pthread_mutex_lock(&Dlock);
         /* Esperar que pase algo */
-	while((timeout=Dclient_timeout_or_pending_data()) > Now()) {
+	while((timeout=getMinTimeOutBackUp()) > Now()) {/*es el tiemout menor*/
 // fprintf(stderr, "timeout=%f, now=%f\n", timeout, Now());
 // fprintf(stderr, "Al tuto %f segundos\n", timeout-Now());
 	    tt.tv_sec = timeout;
@@ -382,12 +411,14 @@ static void *Dsender(void *ppp) {
 	/* Revisar clientes: timeouts y datos entrantes */
 
 	    if(connection.state == FREE) continue;
-	    if(connection.expecting_ack) { /* retransmitir */
-
+	    if(connection.expecting_ack) /*for(i = 0; i < SWS; i++)*/
+            { /* retransmitir */
+                /*Roberto: se revisa si ahi algun paquete con overtime*/
+                indexOfWindow = (i+BackUp.LASTSENDINBOX)%50;
 	    	if(Data_debug) fprintf(stderr, "TIMEOUT\n");
 
-		if(++connection.retries > RETRIES) {
-		    fprintf(stderr, "too many retries: %d\n", connection.retries);
+		if(++BackUp.pending_buf[indexOfWindow][DRET] > RETRIES) {
+		    fprintf(stderr, "too many retries: %d. el numero en el buff %d\n", connection.retries,indexOfWindow);
 	    	    del_connection();
 		    exit(1);
 		}
@@ -403,19 +434,35 @@ static void *Dsender(void *ppp) {
 		}
 
 	    }
-	    else if(boxsz(connection.wbox) != 0) { /* && !connection.expecting_ack) */
+	    if(boxsz(connection.wbox) != 0) { /* && !connection.expecting_ack) */
 /*
 		Hay un buffer para mi para enviar
 		leerlo, enviarlo, marcar esperando ACK
 */
 
 		connection.expected_ack = (LAR + 1)%256; /* David: (connection.expected_ack+1)%2; */
+/*struct {
+    unsigned char pending_buf[SWS][BUF_SIZE];
+    double time_Outs[SWS];
+    unsigned char akg_recive[SWS];
+    int pending_sz[SWS];
+    unsigned char LASTSENDINBOX;
+} BackUp;*/
 
 		for(i=0; i<SWS; i++) {
+                        indexOfWindow = (i+BackUp.LASTSENDINBOX)%50;
+                        if(BackUp.akg_recive[indexOfWindow] )/*Roberto:es para actualizar los paquetes que se han recibido*/
+                            break;
+                        
+                        while(boxsz(connection.wbox) != 0)
+                            ret=pthread_cond_wait(&Dcond, &Dlock);
+                            
 
-			connection.pending_sz = getbox(connection.wbox, (char *)connection.pending_buf+DHDR, BUF_SIZE); 
+			connection.pending_sz = getbox(connection.wbox, (char *)connection.pending_buf+DHDR, BUF_SIZE)+DHDR; /*Roberto se agrega el tamaño del buffer*/
+                        connection.number_read--;
 			connection.pending_buf[DID]=connection.id;
-			connection.pending_buf[DSEQ]=(connection.expected_ack+1)%256; /* David: número de secuencia entre 0 y 255 */
+			connection.pending_buf[DSEQ]=(connection.expected_ack+i)%256; /* David: número de secuencia entre 0 y 255 */
+                        /*Roberto: No se aumentaba el numero de secuencia*/
 			connection.pending_buf[DRET]=0; /* David: inicializamos retransmisiones en 0 */
 
 			if(connection.pending_sz == -1) { /* EOF */ 
@@ -432,16 +479,20 @@ static void *Dsender(void *ppp) {
 		
 			if(i == 0) /* David: si es el primer envío de la ventana */
 				T1 = Now(); /* David: tiempo inicial primer envío */
-			send(Dsock, connection.pending_buf, DHDR+connection.pending_sz, 0);
+			send(Dsock, connection.pending_buf, connection.pending_sz, 0);
+                        BackUp.time_Outs[indexOfWindow] = Now() + getRTT()*1.1;
 			connection.timeout = Now() + getRTT()*1.1;
 
 			/* David: se almacena paquete por si hay que retransmitir */
-			wBackUp(connection.pending_buf, connection.pending_sz, i);
+			wBackUp(connection.pending_buf, connection.pending_sz, indexOfWindow);
+                        connection.expecting_ack = 1;/*Roberto: testeando cosas*/
+                        connection.retries = 0;
 
 		}
-		connection.expecting_ack = 1;
-		connection.retries = 0;
-		LFS = (LAR + SWS - 1)%SWS; /* David: actualizamos LFS */
+		
+		LFS = BackUp.pending_buf[BackUp.LASTSENDINBOX][DSEQ];
+                /*Roberto: de esta manera se almacene el numero de secuencia del ultimo paquete enviado*/
+                /*(LAR + SWS - 1)%SWS; *//* David: actualizamos LFS */
 	    }
 	pthread_mutex_unlock(&Dlock);
     }
