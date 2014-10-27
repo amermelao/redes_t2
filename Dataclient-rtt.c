@@ -1,4 +1,7 @@
 
+#include "Data-seqn.h"
+
+
 #include <strings.h>
 
 #include <stdio.h>
@@ -283,7 +286,7 @@ void Dclose(int cl) {
 
 /* lector del socket: todos los paquetes entrantes */
 static void *Drcvr(void *ppp) { 
-    int cnt;
+    int cnt,cnt2;
     int cl, p,cont;
     unsigned char inbuf[BUF_SIZE];
     int found;
@@ -319,11 +322,14 @@ static void *Drcvr(void *ppp) {
 	else if(inbuf[DTYPE] == ACK && connection.state != FREE
 		&& connection.expecting_ack && ( seqIsHeigher(LAR+1,inbuf[DSEQ]) && seqIsHeigher(inbuf[DSEQ],LFS) ) ) { /* David: se cambia "connection.expected_ack == inbuf[DSEQ]" al operador "<=" */
     	    /* David: medimos RTT cuando recibimos ACK */
-	    if(~inbuf[DRET]) { /* Si no hay retransmisión */
+	    for(cnt2 = 0; cnt2 < 50; cnt2++) /*Roberto: se busca el paquete con mismo nuemro de secuencia y numero de retreansmicion*/
+                if(BackUp.pending_buf[cnt2][DSEQ] == inbuf[DSEQ] && BackUp.pending_buf[cnt2][DRET] == inbuf[DRET])
+            { /* Si no hay retransmisión */
                 connection.timeRef = connection.rtt_time[connection.rtt_idx];/* Roberto: se cambia la referencia al valor que se esta lledo*/
                 connection.rtt_time[connection.rtt_idx] = T2; /* Roberto: se pone el tiempo en que fue recibida la respuesta*/
 	        connection.rtt[connection.rtt_idx] = T2-T1; /* David: guardamos nuevo RTT */
                 connection.rtt_idx = (connection.rtt_idx+1)%SIZE_RTT; /* David: modificamos a posición de siguiente RTT a actualizar */
+                break;
                 
 	    }
 
@@ -340,7 +346,7 @@ static void *Drcvr(void *ppp) {
             }
                 
 
-	    connection.expecting_ack = AND_ack(); /* ??? */
+	    connection.expecting_ack = expectingACK(); /* ??? */
 	    if(connection.state == CLOSED) {
 		/* conexion cerrada y sin buffers pendientes */
 		del_connection();
