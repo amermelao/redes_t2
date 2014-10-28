@@ -1,0 +1,17 @@
+Los que se implemento es la tarea fueron los siguientes algoritmos.
+
+-Go-Back-N: se deja la ventana de 50 (como se especifica mas adelante), y se agrege el parametro  DSEQ el cual almacena el numero de secuencia en el header, cuando se envia un paquete se guarda en el un buffer llamado BackUp, que contiene toda la informcacion de los paquetes dentro de la ventana para poder retransmitirlos.
+
+-Los tiempos adaptables se dejaron igual que en la tarea anterior.
+
+-Los tiempos limites ya estaban adaptados de la tarea anterios.
+
+-Como se especifico la venta es de tamaño 50, lo que significa que el buffer que almacena soporta hasta 50 paquetes.
+
+-En la funcion Drcvr, cuando se recibe un ACk se cheque que esta dentro de los numeros de secuencia esperados, y si es asi todos los paquetes con numeros de secuencias menores se concidarean como recepcionados.
+
+- No se implemento fast retransmision.
+
+- Al header se le agrega el numero de secuencia. Cuando llega un ACK con el mismo numero de secuencia y retries se almacena el tiempo RTT de este paquete para actualizar el valor que se estima.
+
+- No se pudo terminar la tarea por un porblema con los box, presento problemas al momento de leer la ultima porcion del archivo.
