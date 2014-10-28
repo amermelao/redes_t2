@@ -43,7 +43,7 @@ static pthread_cond_t  Dcond;
 static pthread_t Drcvr_pid, Dsender_pid;
 static unsigned char ack[DHDR] = {0, ACK, 0, 0}; /* David: agregamos un byte para indicar retransmisiones */
 double T1, T2; /* David: variables globales para calcular RTTs */
-char LAR = -1, LFS = 0; /* David: LAR y LFS de Go-back-N . Roberto: Se inicializa en -1 para que la promera vez se haga 0*/
+unsigned char LAR = -1, LFS = 0; /* David: LAR y LFS de Go-back-N . Roberto: Se inicializa en -1 para que la promera vez se haga 0*/
 
 static void *Dsender(void *ppp);
 static void *Drcvr(void *ppp);
@@ -80,7 +80,7 @@ struct {
 
 /* David: almacenar paquetes para posible retransmisión en Go-back-N */
 void wBackUp(unsigned char pending_buf[BUF_SIZE], int pending_sz, int index) {
-    	memcpy(BackUp.pending_buf[index],pending_buf,pending_sz);/*Robert: strcopy no hacia bn su trabajo*/
+    	memcpy(BackUp.pending_buf[index],pending_buf,pending_sz + DHDR);/*Robert: strcopy no hacia bn su trabajo*/
         BackUp.akg_recive[index] = 0;
 	BackUp.pending_sz[index] = pending_sz;
 }
@@ -110,10 +110,12 @@ double getRTT() {
 }
 /*Roberto calcula la diferencia entre los numeros de secuencia evitando el salto entre 255 y 0*/
 
-int seqIsHeigher(int seqBuffPackage, int seqAKG){
-    if(seqAKG < 49 && seqBuffPackage > 150)
-        seqAKG += 256;
-    return seqBuffPackage <= seqAKG;
+int seqIsHeigher(unsigned char seqBuffPackage, unsigned char seqAKG){
+    int auxSeq = (int) seqBuffPackage;
+    int auxAKG = (int) seqAKG;
+    if(auxAKG < 49 && auxSeq > 150)
+        auxAKG += 256;
+    return auxSeq <= auxAKG;
 }
 
 /* retorna hora actual */
@@ -461,8 +463,10 @@ static void *Dsender(void *ppp) {
 
 			if(Data_debug)
 				fprintf(stderr, "Re-send DATA %d, seq=%d\n", BackUp.pending_buf[indexOfWindow][DID], BackUp.pending_buf[indexOfWindow][DSEQ]);
-                        if(send(Dsock, BackUp.pending_buf[indexOfWindow], DHDR+BackUp.pending_sz[indexOfWindow], 0) < 0)
+                        if(send(Dsock, BackUp.pending_buf[indexOfWindow], DHDR + BackUp.pending_sz[indexOfWindow], 0) < 0)
+                        {
                                 perror("send2"); exit(1);
+                        }
                         connection.timeout = Now() + getRTT()*1.1;
                 }
 
@@ -492,7 +496,7 @@ static void *Dsender(void *ppp) {
                             ret=pthread_cond_wait(&Dcond, &Dlock);
                             
 
-			connection.pending_sz = getbox(connection.wbox, (char *)connection.pending_buf+DHDR, BUF_SIZE)+DHDR; /*Roberto se agrega el tamaño del buffer*/
+			connection.pending_sz = getbox(connection.wbox, (char *)connection.pending_buf+DHDR, BUF_SIZE); /*Roberto se agrega el tamaño del buffer*/
 			connection.pending_buf[DID]=connection.id;
 			connection.pending_buf[DSEQ]=(connection.expected_ack+i)%256; /* David: número de secuencia entre 0 y 255 */
                         /*Roberto: No se aumentaba el numero de secuencia*/
@@ -513,7 +517,7 @@ static void *Dsender(void *ppp) {
 			if(i == 0) /* David: si es el primer envío de la ventana */
 				T1 = Now(); /* David: tiempo inicial primer envío */
                         
-                        if(send(Dsock, connection.pending_buf, connection.pending_sz, 0) < 0) {
+                        if(send(Dsock, connection.pending_buf, DHDR + connection.pending_sz, 0) < 0) {
 		    		perror("send2"); exit(1);
 			}
                         
