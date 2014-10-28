@@ -130,7 +130,7 @@ int expectingACK() {
 /* Roberto: calcula la diferencia entre los numeros de secuencia evitando el salto entre 255 y 0*/
 int seqIsHeigher(int seqBuffPackage, int seqACK) {
     if( seqACK < 49 && seqBuffPackage > 150 )
-        seqACK += 255;
+        return seqBuffPackage <= seqACK + 255;
     return seqBuffPackage <= seqACK;
 }
 
@@ -246,7 +246,7 @@ fprintf(stderr, "conectado con id=%d\n", cl);
 
 /* Lectura */
 int Dread(int cl, char *buf, int l) {
-int cnt;
+    int cnt;
 
     if(connection.id != cl) return -1;
 
@@ -338,7 +338,9 @@ static void *Drcvr(void *ppp) {
 
 	    /* David: se marca recepción del paquete para n-ésimo paquete e inferiores*/
 	    for( i=0; i<SWS; i++){
-                if(seqIsHeigher(BackUp.pending_buf[(i+BackUp.LASTSENDINBOX+1)%SWS][DSEQ] , inbuf[DSEQ])) {
+		unsigned char seqBuf = BackUp.pending_buf[(i+BackUp.LASTSENDINBOX+1)%SWS][DSEQ];
+		unsigned char seqAck = inbuf[DSEQ];
+                if(seqIsHeigher((int)seqBuf,(int)seqAck)) {
                     BackUp.ack_received[(i+BackUp.LASTSENDINBOX+1)%SWS]++;
                     continue; /* Roberto: avisar que el ack de ese paquete llego*/
                 }
@@ -377,19 +379,14 @@ static void *Drcvr(void *ppp) {
 		    ack[DSEQ] = connection.expected_seq - 1;
 		else
 		    ack[DSEQ] = 255;
-		if(send(Dsock, ack, DHDR, 0) <0)
-                	perror("sendack");
-		pthread_mutex_unlock(&Dlock);
-		continue;
 	    }
-	    else {
-		if(send(Dsock, ack, DHDR, 0) <0)
-                	perror("sendack");
-	    }
+	    else
+		connection.expected_seq = (connection.expected_seq+1)%256;
+	    if(send(Dsock, ack, DHDR, 0) <0)
+               	perror("sendack");
 
-            connection.expected_seq = (connection.expected_seq+1)%256; /* David: número de secuencia entre 0 y 255 */
-	/* enviar a la cola */
-	    putbox(connection.rbox, (char *)inbuf+DHDR, cnt-DHDR);
+            putbox(connection.rbox, (char *)inbuf+DHDR, cnt-DHDR);
+	   
         }
 	else if(Data_debug) {
 	    fprintf(stderr, "descarto paquete entrante: t=%c, id=%d\n", inbuf[DTYPE], inbuf[DID]);
@@ -466,8 +463,9 @@ static void *Dsender(void *ppp) {
 
 			if(Data_debug)
 				fprintf(stderr, "Re-send DATA %d, seq=%d\n", BackUp.pending_buf[indexOfWindow][DID], BackUp.pending_buf[indexOfWindow][DSEQ]);
-                        if(send(Dsock, BackUp.pending_buf[indexOfWindow], DHDR+BackUp.pending_sz[indexOfWindow], 0) < 0)
+                        if( send(Dsock, BackUp.pending_buf[indexOfWindow], DHDR+BackUp.pending_sz[indexOfWindow], 0) < 0 ) {
                                 perror("send2"); exit(1);
+			}
                         BackUp.timeout[i] = Now() + getRTT()*1.1; /* David: se actualiza el timeout de cada paquete */
                 }
 
