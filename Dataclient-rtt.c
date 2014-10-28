@@ -515,7 +515,9 @@ static void *Dsender(void *ppp) {
 
 			/* David: se almacena paquete por si hay que retransmitir */
 			wBackUp(connection.pending_buf, connection.pending_sz, indexOfWindow);
-
+                        
+                        /*No borrar*/
+                        connection.expecting_ack = 1;
 		}
 		
 		LFS = BackUp.pending_buf[BackUp.LASTSENDINBOX][DSEQ];
