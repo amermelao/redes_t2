@@ -1,5 +1,3 @@
-#include "Data-seqn.h"
-
 #include <strings.h>
 
 #include <stdio.h>
@@ -18,7 +16,7 @@
 #include <string.h>
 #include "jsocket6.4.h"
 #include "bufbox.h"
-#include "Data-rtt.h"
+#include "Data-seqn.h"
 
 #define MAX_QUEUE 100 /* buffers en boxes */
 #define SIZE_RTT 10 /* David: cantidad de RTTs a promediar */
@@ -40,8 +38,8 @@ static pthread_mutex_t Dlock;
 static pthread_cond_t  Dcond;
 static pthread_t Drcvr_pid, Dsender_pid;
 static unsigned char ack[DHDR] = {0, ACK, 0, 0}; /* David: agregamos un byte para indicar retransmisiones */
-double T1, T2; /* David: variables globales para calcular RTTs */
 char LAR = -1, LFS = 0; /* David: LAR y LFS de Go-back-N . Roberto: Se inicializa en -1 para que la primera vez se haga 0*/
+int FastRetransmit = 0;
 
 static void *Dsender(void *ppp);
 static void *Drcvr(void *ppp);
@@ -77,6 +75,24 @@ struct {
 
 /* Funciones utilitarias */
 
+/* retorna hora actual */
+double Now() {
+    struct timespec tt;
+#ifdef __MACH__ // OS X does not have clock_gettime, use clock_get_time
+    clock_serv_t cclock;
+    mach_timespec_t mts;
+    host_get_clock_service(mach_host_self(), CALENDAR_CLOCK, &cclock);
+    clock_get_time(cclock, &mts);
+    mach_port_deallocate(mach_task_self(), cclock);
+    tt.tv_sec = mts.tv_sec;
+    tt.tv_nsec = mts.tv_nsec;
+#else
+    clock_gettime(CLOCK_REALTIME, &tt);
+#endif
+
+    return(tt.tv_sec+1e-9*tt.tv_nsec);
+}
+
 /* David: RTT promedio de la ventana */
 double getRTT() {
     int i;
@@ -94,16 +110,16 @@ double getRTT() {
 }
 
 /* David: almacenar paquetes para posible retransmisión en Go-back-N */
-void wBackUp(unsigned char pending_buf[BUF_SIZE], int pending_sz, int index) {
+void wBackUp(unsigned char *pending_buf, int pending_sz, int index) {
         BackUp.sentTime[index] = Now(); /* David: se marca tiempo de envío */
         memcpy(BackUp.pending_buf[index],pending_buf,pending_sz);/*Robert: strcopy no hacia bn su trabajo*/
         BackUp.pending_sz[index] = pending_sz;
-        BackUp.expecting_ack[index] = 0;
+        BackUp.ack_received[index] = 0;
         BackUp.timeout[index] = BackUp.sentTime[index] + getRTT()*1.1;
 }
 
 /* David: revisar si es que se espera algún ACK */
-unsigned char expectingACK() {
+int expectingACK() {
         int k;
         for( k=0; k<SWS; k++ )
                 if( !BackUp.ack_received[k] )
@@ -114,7 +130,7 @@ unsigned char expectingACK() {
 /* Roberto: calcula la diferencia entre los numeros de secuencia evitando el salto entre 255 y 0*/
 int seqIsHeigher(int seqBuffPackage, int seqACK) {
     if( seqACK < 49 && seqBuffPackage > 150 )
-        seqACK += 256;
+        seqACK += 255;
     return seqBuffPackage <= seqACK;
 }
 
@@ -128,24 +144,6 @@ double getMinTimeOutBackUp() {
         }
     }
     return min;
-}
-
-/* retorna hora actual */
-double Now() {
-    struct timespec tt;
-#ifdef __MACH__ // OS X does not have clock_gettime, use clock_get_time
-    clock_serv_t cclock;
-    mach_timespec_t mts;
-    host_get_clock_service(mach_host_self(), CALENDAR_CLOCK, &cclock);
-    clock_get_time(cclock, &mts);
-    mach_port_deallocate(mach_task_self(), cclock);
-    tt.tv_sec = mts.tv_sec;
-    tt.tv_nsec = mts.tv_nsec;
-#else
-    clock_gettime(CLOCK_REALTIME, &tt);
-#endif
-
-    return(tt.tv_sec+1e-9*tt.tv_nsec);
 }
 
 /* Inicializa estructura conexión */
@@ -171,7 +169,7 @@ int init_connection(int id, double rtt,double timeRef, double timeNow) { /* Davi
 
     for(i = 0; i < SWS; i++)
     {
-        BackUp.akg_recive[i] = 1;
+        BackUp.ack_received[i] = 1;
         /*Roberto se inicialisan valores*/
     }
     BackUp.LASTSENDINBOX = -1;
@@ -240,7 +238,7 @@ int Dconnect(char *server, char *port) {
 	return -1;
     }
 fprintf(stderr, "conectado con id=%d\n", cl);
-    printf("RTT calculado en inicio de conexión: %f\n",T2-T1);
+    printf("RTT calculado en inicio de conexión: %f\n",t2-t1);
     init_connection(cl,t2-t1,t1,t2); /* David: se pasa rtt=t2-t1 como parámetro. Robeto: y t1, t2, para el calculo de los pesos */
     Init_Dlayer(s); /* Inicializa y crea threads */
     return cl;
@@ -319,8 +317,8 @@ static void *Drcvr(void *ppp) {
 	    connection.state = CLOSED;
 	    Dclose(cl);
 	}
-	else if(inbuf[DTYPE] == ACK && connection.state != FREE
-		&& connection.expecting_ack && ( seqIsHeigher(LAR+1,inbuf[DSEQ]) && seqIsHeigher(inbuf[DSEQ],LFS) ) ) { /* David: se cambia "connection.expected_ack == inbuf[DSEQ]" al operador "<=" */
+	else if((inbuf[DTYPE] == ACK && connection.state != FREE
+		&& expectingACK()) ) {/* && ( seqIsHeigher(LAR+1,inbuf[DSEQ]) && seqIsHeigher(inbuf[DSEQ],LFS) ) ) {*/ /* David: se cambia "connection.expected_ack == inbuf[DSEQ]" al operador "<=" */
 
 	    /* Si no hay retransmisión */
 
@@ -378,7 +376,7 @@ static void *Drcvr(void *ppp) {
 		if( connection.expected_seq > 0 )
 		    ack[DSEQ] = connection.expected_seq - 1;
 		else
-		    ack[DSEQ] = 256;
+		    ack[DSEQ] = 255;
 		if(send(Dsock, ack, DHDR, 0) <0)
                 	perror("sendack");
 		pthread_mutex_unlock(&Dlock);
@@ -409,17 +407,19 @@ double Dclient_timeout_or_pending_data() {
 /* Suponemos lock ya tomado! */
 
     timeout = Now() + getRTT()*1.1;/* David: antes era Now()+20.0 */
-	if(connection.state == FREE) return timeout;
+	if( connection.state == FREE ) return timeout;
 
-	if(boxsz(connection.wbox) != 0 && !connection.expecting_ack)
+	if( boxsz(connection.wbox) != 0 && !expectingACK() )
 	/* data from client */
 	    return Now();
 
-        if(!connection.expecting_ack)
+        if( !expectingACK() )
 	    return timeout;
 
-	if(connection.timeout <= Now()) return Now();
-	if(connection.timeout < timeout) timeout = connection.timeout;
+	double minTimeout = getMinTimeOutBackUp();
+
+	if( minTimeout <= Now() ) return Now();
+	if( minTimeout < timeout) timeout = minTimeout;
     return timeout;
 }
 
@@ -434,7 +434,7 @@ static void *Dsender(void *ppp) {
     for(;;) {
 	pthread_mutex_lock(&Dlock);
         /* Esperar que pase algo */
-	while((timeout=getMinTimeOutBackUp()) > Now()) {/*es el tiemout menor*/
+	while((timeout=Dclient_timeout_or_pending_data()) > Now()) {/*es el tiemout menor*/
 // fprintf(stderr, "timeout=%f, now=%f\n", timeout, Now());
 // fprintf(stderr, "Al tuto %f segundos\n", timeout-Now());
 	    tt.tv_sec = timeout;
@@ -448,7 +448,7 @@ static void *Dsender(void *ppp) {
 	/* Revisar clientes: timeouts y datos entrantes */
 
 	    if(connection.state == FREE) continue;
-	    if(expectingACK() && timeout < Now()) /* David: cambiamos connection.expecting_ack */
+	    if ( BackUp.ack_received[(BackUp.LASTSENDINBOX+1)%SWS] == 0 ) /*( expectingACK() && timeout < Now())*/ /* David: cambiamos connection.expecting_ack */
             { /* retransmitir */
 
                 /* Roberto: se revisa si hay algun paquete con overtime */
@@ -459,7 +459,7 @@ static void *Dsender(void *ppp) {
 			if(BackUp.ack_received[indexOfWindow] >= 1)
 				continue;
                     	if(++BackUp.pending_buf[indexOfWindow][DRET] > RETRIES) {
-                        	fprintf(stderr, "too many retries: %d. el numero en el buff %d\n", connection.retries,indexOfWindow);
+                        	fprintf(stderr, "too many retries: %d. el numero en el buff %d\n", BackUp.pending_buf[indexOfWindow][DRET], indexOfWindow);
                         	del_connection();
                         	exit(1);
                     	}
@@ -480,19 +480,18 @@ static void *Dsender(void *ppp) {
 
 		connection.expected_ack = (LFS + 1)%256; /* David: (connection.expected_ack+1)%2; */
 
-		for(i=0; i<SWS; i++) {
+		for( i=0; i<SWS; i++ ) {
                         indexOfWindow = (BackUp.LASTSENDINBOX+1)%SWS;
                         
-                        if(!BackUp.ack_received[indexOfWindow] )/*Roberto:es para actualizar los paquetes que se han recibido*/
+                        if( BackUp.ack_received[indexOfWindow] == 0 )/*Roberto:es para actualizar los paquetes que se han recibido*/
                             break;
                         BackUp.LASTSENDINBOX = indexOfWindow;
                         while(boxsz(connection.wbox) == 0)
                             ret=pthread_cond_wait(&Dcond, &Dlock);
-                            
 
 			connection.pending_sz = getbox(connection.wbox, (char *)connection.pending_buf+DHDR, BUF_SIZE)+DHDR; /*Roberto se agrega el tamaño del buffer*/
-			connection.pending_buf[DID]=connection.id;
-			connection.pending_buf[DSEQ]=(connection.expected_ack+i)%256; /* David: número de secuencia entre 0 y 255 */
+			connection.pending_buf[DID] = connection.id;
+			connection.pending_buf[DSEQ] = (connection.expected_ack+i)%256; /* David: número de secuencia entre 0 y 255 */
                         /*Roberto: No se aumentaba el numero de secuencia*/
 			connection.pending_buf[DRET]=0; /* David: inicializamos retransmisiones en 0 */
 
@@ -507,26 +506,19 @@ static void *Dsender(void *ppp) {
 					fprintf(stderr, "sending DATA id=%d, seq=%d\n", connection.id, connection.pending_buf[DSEQ]);
 		   		connection.pending_buf[DTYPE]=DATA;
 			}
-		
-			if(i == 0) /* David: si es el primer envío de la ventana */
-				T1 = Now(); /* David: tiempo inicial primer envío */
-                        
+
+			LFS = connection.pending_buf[DSEQ]; /* David: bug corregido */
+
                         if(send(Dsock, connection.pending_buf, connection.pending_sz, 0) < 0) {
 		    		perror("send2"); exit(1);
 			}
-                        
-			//send(Dsock, connection.pending_buf, connection.pending_sz, 0);
-                        BackUp.time_Outs[indexOfWindow] = Now() + getRTT()*1.1;
-			connection.timeout = Now() + getRTT()*1.1;
 
 			/* David: se almacena paquete por si hay que retransmitir */
 			wBackUp(connection.pending_buf, connection.pending_sz, indexOfWindow);
-                        connection.expecting_ack = 1;
 
 		}
 		
-                connection.retries = 0;
-		LFS = BackUp.pending_buf[BackUp.LASTSENDINBOX][DSEQ];
+		/*LFS = BackUp.pending_buf[BackUp.LASTSENDINBOX][DSEQ]; */
                 /*Roberto: de esta manera se almacene el numero de secuencia del ultimo paquete enviado*/
                 /*(LAR + SWS - 1)%SWS; *//* David: actualizamos LFS */
 	    }
